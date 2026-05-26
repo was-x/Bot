@@ -3,8 +3,7 @@ import re
 import requests
 from urllib.parse import quote
 import logging
-from threading import Thread
-import time
+import json
 
 # --- Configuration ---
 BOT_TOKEN = "8772967393:AAF5ti5vgdPxx1LCZP7n_i8jyKyN-vFOyOA"
@@ -18,30 +17,40 @@ logger = logging.getLogger(__name__)
 # --- Helper Functions ---
 def encode_url(url: str) -> str:
     """Encode URL with # replaced by %23"""
-    # First encode the URL properly
     encoded = quote(url, safe='')
     return encoded
 
-def format_response(response_data: dict) -> str:
+def format_response(response_data) -> str:
     """Format API response for better display"""
+    # Handle if response_data is a string or not a dict
+    if isinstance(response_data, str):
+        return f"❌ **Error:** {response_data}"
+    
+    if not isinstance(response_data, dict):
+        return f"❌ **Unexpected response:** {response_data}"
+    
     if response_data.get("success"):
         msg = "✅ **SUCCESSFUL PAYMENT** ✅\n\n"
         msg += f"📊 **Attempts:** {response_data.get('attempts', 1)}\n"
         
         if response_data.get("card"):
             card = response_data["card"]
-            msg += f"💳 **Card:** •••• {card.get('last4', 'N/A')}\n"
-            msg += f"📅 **Expiry:** {card.get('exp', 'N/A')}\n"
+            if isinstance(card, dict):
+                msg += f"💳 **Card:** •••• {card.get('last4', 'N/A')}\n"
+                msg += f"📅 **Expiry:** {card.get('exp', 'N/A')}\n"
         
-        msg += f"💰 **Amount:** ${response_data.get('amount', 'N/A')}\n"
-        msg += f"🌐 **Currency:** {response_data.get('currency', 'usd').upper()}\n"
+        if response_data.get("amount"):
+            msg += f"💰 **Amount:** ${response_data.get('amount')}\n"
+        if response_data.get("currency"):
+            msg += f"🌐 **Currency:** {response_data.get('currency', 'usd').upper()}\n"
         
         if response_data.get("requires3DS"):
             msg += "⚠️ **3DS Challenge Required**\n"
             if response_data.get("paymentIntent"):
                 pi = response_data["paymentIntent"]
-                msg += f"🆔 **Payment Intent:** `{pi.get('id', 'N/A')}`\n"
-                msg += f"📌 **Status:** {pi.get('status', 'N/A')}\n"
+                if isinstance(pi, dict):
+                    msg += f"🆔 **Payment Intent:** `{pi.get('id', 'N/A')}`\n"
+                    msg += f"📌 **Status:** {pi.get('status', 'N/A')}\n"
         
         msg += "\n💸 Payment processed successfully!"
         return msg
@@ -52,14 +61,15 @@ def format_response(response_data: dict) -> str:
         
         if response_data.get("error"):
             error = response_data["error"]
-            msg += f"\n⚠️ **Error Details:**\n"
-            msg += f"• Type: {error.get('type', 'N/A')}\n"
-            msg += f"• Code: {error.get('code', 'N/A')}\n"
-            msg += f"• Decline Code: {error.get('decline_code', 'N/A')}\n"
-            msg += f"• Message: {error.get('message', 'N/A')}\n"
-            
-            if error.get("doc_url"):
-                msg += f"• Docs: {error.get('doc_url')}\n"
+            if isinstance(error, dict):
+                msg += f"\n⚠️ **Error Details:**\n"
+                msg += f"• Type: {error.get('type', 'N/A')}\n"
+                msg += f"• Code: {error.get('code', 'N/A')}\n"
+                msg += f"• Decline Code: {error.get('decline_code', 'N/A')}\n"
+                msg += f"• Message: {error.get('message', 'N/A')}\n"
+                
+                if error.get("doc_url"):
+                    msg += f"• Docs: {error.get('doc_url')}\n"
         
         return msg
 
@@ -93,7 +103,7 @@ def validate_url(url: str) -> tuple:
         url = "https://" + url
     
     if "stripe.com" not in url:
-        return False, "Not a valid Stripe URL!"
+        return False, "Not a valid Stripe URL! URL must contain 'stripe.com'"
     
     return True, url
 
@@ -105,11 +115,13 @@ def call_stripe_api(stripe_url: str, card_data: tuple = None) -> dict:
         
         if card_data:
             # With card details
-            cc, mm, yyyy, cvv = card_data
             api_url = f"{API_BASE_URL}/stripe/checkout-based/url/{encoded_url}"
             
             # Format card as required by API: CC|MM|YYYY|CVV
+            cc, mm, yyyy, cvv = card_data
             card_string = f"{cc}|{mm}|{yyyy}|{cvv}"
+            
+            logger.info(f"Calling API with card: {api_url[:100]}...")
             
             response = requests.post(
                 api_url,
@@ -118,20 +130,27 @@ def call_stripe_api(stripe_url: str, card_data: tuple = None) -> dict:
                 timeout=30
             )
         else:
-            # Without card - just get status
+            # Without card - just get status (GET request)
             api_url = f"{API_BASE_URL}/stripe/checkout-based/url/{encoded_url}"
+            logger.info(f"Calling API without card: {api_url[:100]}...")
             response = requests.get(api_url, timeout=30)
         
+        logger.info(f"Response status: {response.status_code}")
+        
         if response.status_code == 200:
-            return response.json()
+            try:
+                return response.json()
+            except:
+                return {"success": False, "message": f"Invalid JSON response: {response.text[:200]}"}
         else:
-            return {"success": False, "message": f"API Error: {response.status_code}", "error": response.text}
+            return {"success": False, "message": f"API Error: {response.status_code}", "error": response.text[:500]}
     
     except requests.exceptions.Timeout:
         return {"success": False, "message": "Request timeout! API took too long to respond"}
     except requests.exceptions.ConnectionError:
         return {"success": False, "message": "Connection error! Cannot reach API server"}
     except Exception as e:
+        logger.error(f"API call error: {e}")
         return {"success": False, "message": f"Error: {str(e)}"}
 
 # --- Bot Commands ---
@@ -157,19 +176,19 @@ Hello {user_name}! I'm a powerful Stripe payment testing bot.
 
 **How to use:**
 Send a Stripe checkout URL directly, or use:
-`/cc {stripe_url} {card_details}`
+`/cc <stripe_url> <CC|MM|YYYY|CVV>`
 
-Example:
+**Example:**
 `/cc https://checkout.stripe.com/c/pay/... 4111111111111111|02|2030|123`
     """
     
     # Create inline keyboard
-    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard = telebot.types.InlineKeyboardMarkup(row_width=2)
     buttons = [
-        InlineKeyboardButton("📝 Help", callback_data="help"),
-        InlineKeyboardButton("ℹ️ About", callback_data="about"),
-        InlineKeyboardButton("⚡ Test Card", callback_data="test_card"),
-        InlineKeyboardButton("👤 Profile", callback_data="profile")
+        telebot.types.InlineKeyboardButton("📝 Help", callback_data="help"),
+        telebot.types.InlineKeyboardButton("ℹ️ About", callback_data="about"),
+        telebot.types.InlineKeyboardButton("⚡ Test Card", callback_data="test_card"),
+        telebot.types.InlineKeyboardButton("👤 Profile", callback_data="profile")
     ]
     keyboard.add(*buttons)
     
@@ -226,8 +245,8 @@ def process_cc_command(message):
         if len(parts) < 2:
             bot.reply_to(message, 
                 "❌ **Invalid Usage!**\n\n"
-                "Use: `/cc {stripe_url} {CC|MM|YYYY|CVV}`\n\n"
-                "Example:\n"
+                "Use: `/cc <stripe_url> <CC|MM|YYYY|CVV>`\n\n"
+                "**Example:**\n"
                 "`/cc https://checkout.stripe.com/c/pay/... 4111111111111111|02|2030|123`",
                 parse_mode="Markdown"
             )
@@ -259,8 +278,8 @@ def process_cc_command(message):
         bot.edit_message_text(formatted_response, message.chat.id, processing_msg.message_id, parse_mode="Markdown")
         
     except Exception as e:
-        bot.reply_to(message, f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
         logger.error(f"Error in cc command: {e}")
+        bot.reply_to(message, f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True, content_types=['text'])
 def handle_text(message):
@@ -276,7 +295,7 @@ def handle_text(message):
         bot.reply_to(message, 
             "❌ **Invalid Input!**\n\n"
             "Please send a valid Stripe checkout URL or use:\n"
-            "`/cc {url} {card_details}`\n\n"
+            "`/cc <url> <card_details>`\n\n"
             "Type `/help` for more info",
             parse_mode="Markdown"
         )
